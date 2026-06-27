@@ -8,4 +8,10 @@ layout:
 - go.kubebuilder.io/v4
 projectName: kueue-cluster-select-controller
 repo: github.com/elotl/kueue-cluster-select-controller
+resources:
+- controller: true
+  domain: elotl.co
+  group: kueue.x-k8s.io
+  kind: Workload
+  version: v1beta1
 version: "3"
