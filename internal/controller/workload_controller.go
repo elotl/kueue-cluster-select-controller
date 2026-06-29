@@ -22,8 +22,10 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -33,9 +35,12 @@ import (
 
 // WorkloadReconciler reconciles a Workload object
 type WorkloadReconciler struct {
-	client.Client
-	Scheme *runtime.Scheme
+	client.Client  // local cluster
+	Scheme         *runtime.Scheme
+	SchedAPIClient kubernetes.Interface // Nova scheduling API server inside cluster
 }
+
+const DefaultTargetClusterName = "anne-dra"
 
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
 func (r *WorkloadReconciler) getOwnerJob(ctx context.Context, c client.Client, wl *kueuev1beta1.Workload) (*batchv1.Job, error) {
@@ -59,17 +64,80 @@ func (r *WorkloadReconciler) getOwnerJob(ctx context.Context, c client.Client, w
 	return nil, fmt.Errorf("no matching owner found")
 }
 
+func sanitizeJobForSubmission(job *batchv1.Job) *batchv1.Job {
+	j := job.DeepCopy()
+
+	// Clear server-populated metadata
+	j.ResourceVersion = ""
+	j.UID = ""
+	j.CreationTimestamp = metav1.Time{}
+	j.ManagedFields = nil
+	j.OwnerReferences = nil
+	j.Finalizers = nil
+	j.Generation = 0
+
+	// Clear the auto-generated selector — the target API server will generate its own
+	j.Spec.Selector = nil
+
+	// Remove the auto-generated controller labels from the pod template
+	// These are tied to the UID of the Job on the SOURCE cluster
+	labelsToRemove := []string{
+		"controller-uid",
+		"job-name",
+		"batch.kubernetes.io/controller-uid",
+		"batch.kubernetes.io/job-name",
+	}
+	for _, label := range labelsToRemove {
+		delete(j.Spec.Template.Labels, label)
+	}
+
+	// Let the target API server auto-generate the selector and labels
+	if j.Spec.Template.Labels == nil {
+		j.Spec.Template.Labels = map[string]string{}
+	}
+
+	return j
+}
+
+func (r *WorkloadReconciler) submitJobToSchedAPI(
+	ctx context.Context,
+	job *batchv1.Job,
+) (*batchv1.Job, error) {
+
+	sanitizedJob := sanitizeJobForSubmission(job)
+	result, err := r.SchedAPIClient.BatchV1().Jobs(job.Namespace).Create(
+		ctx,
+		sanitizedJob,
+		metav1.CreateOptions{},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("submitting job to hosted API: %w", err)
+	}
+
+	return result, nil
+}
+
 func (r *WorkloadReconciler) getRecommendedClusters(ctx context.Context, workload *kueuev1beta1.Workload) []string {
 	logger := log.FromContext(ctx)
 
 	ownerJob, err := r.getOwnerJob(ctx, r.Client, workload)
 	if err != nil {
-		logger.Error(err, "Failed to fetch Workload")
-		return []string{"anne-dra"}
+		logger.Error(err, "Failed to fetch Workload; using hard-coded cluster name",
+			"DefaultTargetClusterName", DefaultTargetClusterName)
+		return []string{DefaultTargetClusterName}
 	}
-
 	logger.Info("Successfully got Workload owner job", "clusters", ownerJob)
-	return []string{"anne-dra"}
+
+	result, err := r.submitJobToSchedAPI(ctx, ownerJob)
+	if err != nil {
+		logger.Error(err, "Failure submitting Job to Nova sched API; using hard-coded cluster name",
+			"DefaultTargetClusterName", DefaultTargetClusterName)
+		return []string{DefaultTargetClusterName}
+	}
+	logger.Info("Successfully submitted job to sched endpoint", "clusters", result)
+
+	// Check job at SchedAPIClient for targetCluster
+	return []string{DefaultTargetClusterName}
 }
 
 // RBAC permissions required to watch and patch Kueue Workloads
@@ -95,8 +163,7 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, nil
 	}
 
-	// 3. Compute your custom recommendations
-	// Replace this mock with your genuine multicluster recommendation engine
+	// 3. Compute cluster recommendation
 	recommendedClusters := r.getRecommendedClusters(ctx, &workload)
 
 	// 4. Evaluate if the patch is actually required to avoid infinite loops

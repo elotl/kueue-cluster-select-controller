@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -27,7 +28,9 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -50,6 +53,19 @@ func init() {
 	utilruntime.Must(kueuev1beta1.AddToScheme(scheme))
 
 	// +kubebuilder:scaffold:scheme
+}
+
+func NewSchedAPIClient(kubeconfigPath string) (kubernetes.Interface, error) {
+	// Load the kubeconfig for the sched API server
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading sched API kubeconfig: %w", err)
+	}
+
+	// Optionally override the host if the service DNS differs inside the cluster
+	// cfg.Host = "https://my-scheduler-api.my-namespace.svc.cluster.local:6443"
+
+	return kubernetes.NewForConfig(cfg)
 }
 
 // nolint:gocyclo
@@ -178,9 +194,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	kubeconfigPath := os.Getenv("SCHEDULER_API_KUBECONFIG")
+	if kubeconfigPath == "" {
+		setupLog.Error(nil, "SCHEDULER_API_KUBECONFIG must be set")
+		os.Exit(1)
+	}
+
+	schedAPIClient, err := NewSchedAPIClient(kubeconfigPath)
+	if err != nil {
+		setupLog.Error(err, "unable to create sched API client")
+		os.Exit(1)
+	}
+
 	if err := (&controller.WorkloadReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:         mgr.GetClient(), // talks to local cluster
+		Scheme:         mgr.GetScheme(),
+		SchedAPIClient: schedAPIClient, // talks to Nova scheduling API cluster
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "workload")
 		os.Exit(1)
