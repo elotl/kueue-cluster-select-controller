@@ -18,9 +18,12 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
+	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -32,6 +35,41 @@ import (
 type WorkloadReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+}
+
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
+func (r *WorkloadReconciler) getOwnerJob(ctx context.Context, c client.Client, wl *kueuev1beta1.Workload) (*batchv1.Job, error) {
+	for _, ref := range wl.OwnerReferences {
+		if ref.Kind == "Job" && ref.APIVersion == "batch/v1" {
+			job := &batchv1.Job{}
+			err := c.Get(ctx, types.NamespacedName{
+				Namespace: wl.Namespace,
+				Name:      ref.Name,
+			}, job)
+			if err != nil {
+				return nil, err
+			}
+			// Verify UID matches to guard against name reuse
+			if job.UID != ref.UID {
+				return nil, fmt.Errorf("job UID mismatch")
+			}
+			return job, nil
+		}
+	}
+	return nil, fmt.Errorf("no matching owner found")
+}
+
+func (r *WorkloadReconciler) getRecommendedClusters(ctx context.Context, workload *kueuev1beta1.Workload) []string {
+	logger := log.FromContext(ctx)
+
+	ownerJob, err := r.getOwnerJob(ctx, r.Client, workload)
+	if err != nil {
+		logger.Error(err, "Failed to fetch Workload")
+		return []string{"anne-dra"}
+	}
+
+	logger.Info("Successfully got Workload owner job", "clusters", ownerJob)
+	return []string{"anne-dra"}
 }
 
 // RBAC permissions required to watch and patch Kueue Workloads
@@ -59,7 +97,7 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// 3. Compute your custom recommendations
 	// Replace this mock with your genuine multicluster recommendation engine
-	recommendedClusters := []string{"anne-dra"}
+	recommendedClusters := r.getRecommendedClusters(ctx, &workload)
 
 	// 4. Evaluate if the patch is actually required to avoid infinite loops
 	if len(workload.Status.NominatedClusterNames) > 0 {
