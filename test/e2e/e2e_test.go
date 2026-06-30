@@ -40,7 +40,7 @@ const namespace = "kueue-cluster-select-controller-system"
 const serviceAccountName = "kueue-cluster-select-controller-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "kueue-cluster-select-controller-controller-manager-metrics-service"
+const metricsServiceName = "kueue-cluster-select-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "kueue-cluster-select-controller-metrics-binding"
