@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -40,10 +41,12 @@ type WorkloadReconciler struct {
 	SchedAPIClient kubernetes.Interface // Nova scheduling API server inside cluster
 }
 
-const DefaultTargetClusterName = "anne-dra"
+const TargetClusterLabelKey = "nova.elotl.co/target-cluster"
 
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch
 func (r *WorkloadReconciler) getOwnerJob(ctx context.Context, c client.Client, wl *kueuev1beta1.Workload) (*batchv1.Job, error) {
+	logger := log.FromContext(ctx)
+
 	for _, ref := range wl.OwnerReferences {
 		if ref.Kind == "Job" && ref.APIVersion == "batch/v1" {
 			job := &batchv1.Job{}
@@ -60,8 +63,9 @@ func (r *WorkloadReconciler) getOwnerJob(ctx context.Context, c client.Client, w
 			}
 			return job, nil
 		}
+		logger.Info("Non-job owner", "clusters", ref)
 	}
-	return nil, fmt.Errorf("no matching owner found")
+	return nil, fmt.Errorf("no matching job owner found")
 }
 
 func sanitizeJobForSubmission(job *batchv1.Job) *batchv1.Job {
@@ -99,6 +103,26 @@ func sanitizeJobForSubmission(job *batchv1.Job) *batchv1.Job {
 	return j
 }
 
+func (r *WorkloadReconciler) getJobFromSchedAPI(
+	ctx context.Context,
+	job *batchv1.Job,
+) (*batchv1.Job, error) {
+
+	existing, err := r.SchedAPIClient.BatchV1().Jobs(job.Namespace).Get(
+		ctx,
+		job.Name,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("fetching job from sched API: %w", err)
+	}
+
+	return existing, nil
+}
+
 func (r *WorkloadReconciler) submitJobToSchedAPI(
 	ctx context.Context,
 	job *batchv1.Job,
@@ -111,7 +135,7 @@ func (r *WorkloadReconciler) submitJobToSchedAPI(
 		metav1.CreateOptions{},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("submitting job to hosted API: %w", err)
+		return nil, fmt.Errorf("submitting job to sched API: %w", err)
 	}
 
 	return result, nil
@@ -122,22 +146,37 @@ func (r *WorkloadReconciler) getRecommendedClusters(ctx context.Context, workloa
 
 	ownerJob, err := r.getOwnerJob(ctx, r.Client, workload)
 	if err != nil {
-		logger.Error(err, "Failed to fetch Workload; using hard-coded cluster name",
-			"DefaultTargetClusterName", DefaultTargetClusterName)
-		return []string{DefaultTargetClusterName}
+		logger.Error(err, "Workload ownerJob fetch error")
+		return []string{}
 	}
 	logger.Info("Successfully got Workload owner job", "clusters", ownerJob)
 
+	novaJob, err := r.getJobFromSchedAPI(ctx, ownerJob)
+	if err != nil {
+		logger.Error(err, "Nova job fetch error")
+		return []string{}
+	}
+
+	// If job was already submitted to Nova, check for target cluster label
+	if novaJob != nil {
+		logger.Info("Successfully got Nova job", "clusters", novaJob)
+		if targetCluster, found := novaJob.GetLabels()[TargetClusterLabelKey]; found {
+			logger.Info("Nova job has assigned target cluster", "clusters", targetCluster)
+			return []string{targetCluster}
+		}
+		logger.Info("Nova job has not yet been assigned a target cluster")
+		return []string{}
+	}
+
+	// Submit Job to Nova for target cluster schedule selection
 	result, err := r.submitJobToSchedAPI(ctx, ownerJob)
 	if err != nil {
-		logger.Error(err, "Failure submitting Job to Nova sched API; using hard-coded cluster name",
-			"DefaultTargetClusterName", DefaultTargetClusterName)
-		return []string{DefaultTargetClusterName}
+		logger.Error(err, "Nova job submission error")
+		return []string{}
 	}
 	logger.Info("Successfully submitted job to sched endpoint", "clusters", result)
 
-	// Check job at SchedAPIClient for targetCluster
-	return []string{DefaultTargetClusterName}
+	return []string{}
 }
 
 // RBAC permissions required to watch and patch Kueue Workloads
@@ -153,7 +192,7 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		if errors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
-		logger.Error(err, "Failed to fetch Workload")
+		logger.Error(err, "Reconcile failed to fetch Workload")
 		return ctrl.Result{}, err
 	}
 
@@ -166,6 +205,10 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// 3. Compute cluster recommendation
 	recommendedClusters := r.getRecommendedClusters(ctx, &workload)
 
+	if len(recommendedClusters) == 0 {
+		return ctrl.Result{RequeueAfter: 20 * time.Second}, nil
+	}
+
 	// 4. Evaluate if the patch is actually required to avoid infinite loops
 	if len(workload.Status.NominatedClusterNames) > 0 {
 		// Optimization: Check if your recommendation matches what's already there
@@ -177,7 +220,7 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	workload.Status.NominatedClusterNames = recommendedClusters
 
 	if err := r.Status().Patch(ctx, &workload, patch); err != nil {
-		logger.Error(err, "Failed to patch nominatedClusterNames on Workload status")
+		logger.Error(err, "Reconcile failed to patch nominatedClusterNames on Workload status")
 		return ctrl.Result{}, err
 	}
 
