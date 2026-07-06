@@ -60,7 +60,7 @@ spec:
           secretName: target-api-kubeconfig
       containers:
       - name: controller
-        image: elotl/kueue-cluster-select-controller:v0.0.1e
+        image: elotl/kueue-cluster-select-controller:v0.0.1g
         imagePullPolicy: IfNotPresent
         env:
         - name: SCHEDULER_API_KUBECONFIG
