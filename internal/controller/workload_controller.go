@@ -23,6 +23,7 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -141,25 +142,71 @@ func (r *WorkloadReconciler) submitJobToSchedAPI(
 	return result, nil
 }
 
+func (r *WorkloadReconciler) delJobFromSchedAPI(
+	ctx context.Context,
+	job *batchv1.Job,
+) error {
+
+	err := r.SchedAPIClient.BatchV1().Jobs(job.Namespace).Delete(
+		ctx,
+		job.Name,
+		metav1.DeleteOptions{},
+	)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (r *WorkloadReconciler) delNovaJob(ctx context.Context, workload *kueuev1beta1.Workload) {
+	logger := log.FromContext(ctx)
+
+	ownerJob, err := r.getOwnerJob(ctx, r.Client, workload)
+	if err != nil {
+		logger.Error(err, "Workload ownerJob fetch error in delNovaJob")
+		return
+	}
+
+	novaJob, err := r.getJobFromSchedAPI(ctx, ownerJob)
+	if err != nil {
+		if !errors.IsNotFound(err) {
+			logger.Error(err, "Nova job fetch error in delNovaJob")
+		}
+		return
+	}
+
+	if novaJob != nil {
+		logger.Info("Successfully got Nova job in delNovaJob", "clusters", novaJob)
+		err = r.delJobFromSchedAPI(ctx, novaJob)
+		if err != nil {
+			logger.Error(err, "Nova job delete error in delNovaJob")
+		}
+	}
+}
+
 func (r *WorkloadReconciler) getRecommendedClusters(ctx context.Context, workload *kueuev1beta1.Workload) []string {
 	logger := log.FromContext(ctx)
 
 	ownerJob, err := r.getOwnerJob(ctx, r.Client, workload)
 	if err != nil {
-		logger.Error(err, "Workload ownerJob fetch error")
+		logger.Error(err, "Workload ownerJob fetch error in getRecommendedClusters")
 		return []string{}
 	}
 	logger.Info("Successfully got Workload owner job", "clusters", ownerJob)
 
 	novaJob, err := r.getJobFromSchedAPI(ctx, ownerJob)
 	if err != nil {
-		logger.Error(err, "Nova job fetch error")
+		logger.Error(err, "Nova job fetch error in getRecommendedClusters")
 		return []string{}
 	}
 
 	// If job was already submitted to Nova, check for target cluster label
 	if novaJob != nil {
-		logger.Info("Successfully got Nova job", "clusters", novaJob)
+		logger.Info("Successfully got Nova job in getRecommendedClusters", "clusters", novaJob)
 		if targetCluster, found := novaJob.GetLabels()[TargetClusterLabelKey]; found {
 			logger.Info("Nova job has assigned target cluster", "clusters", targetCluster)
 			return []string{targetCluster}
@@ -183,6 +230,8 @@ func (r *WorkloadReconciler) getRecommendedClusters(ctx context.Context, workloa
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads,verbs=get;list;watch
 // +kubebuilder:rbac:groups=kueue.x-k8s.io,resources=workloads/status,verbs=get;update;patch
 
+// This MultiKueue job workload reconciler fetches a target cluster recommendation from Nova running
+// in schedule-only mode.  And when the MultiKueue workload is complete, it deletes the job from Nova.
 func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -196,9 +245,16 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
-	// 2. Check if the workload is finalized/admitted to stop redundant patching
+	// 2. Check if the workload is finalized/admitted to stop redundant target cluster patching
 	// In Kueue, once .status.clusterName is set, it becomes immutable and overrides nominations.
 	if workload.Status.ClusterName != nil && len(*workload.Status.ClusterName) > 0 {
+
+		// If workload is finished, clean up associated Nova job
+		finishedCond := meta.FindStatusCondition(workload.Status.Conditions, kueuev1beta1.WorkloadFinished)
+		if finishedCond != nil && finishedCond.Status == metav1.ConditionTrue {
+			r.delNovaJob(ctx, &workload)
+		}
+
 		return ctrl.Result{}, nil
 	}
 

@@ -1,0 +1,88 @@
+# serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kueue-cluster-select-controller
+  namespace: kueue-cluster-select-system
+---
+# clusterrole.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kueue-cluster-select-controller
+rules:
+- apiGroups: ["kueue.x-k8s.io"]
+  resources: ["workloads"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["kueue.x-k8s.io"]
+  resources: ["workloads/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch"]
+---
+# clusterrolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kueue-cluster-select-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kueue-cluster-select-controller
+subjects:
+- kind: ServiceAccount
+  name: kueue-cluster-select-controller
+  namespace: kueue-cluster-select-system
+---
+# deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kueue-cluster-select-controller
+  namespace: kueue-cluster-select-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kueue-cluster-select-controller
+  template:
+    metadata:
+      labels:
+        app: kueue-cluster-select-controller
+    spec:
+      serviceAccountName: kueue-cluster-select-controller
+      imagePullSecrets:
+      - name: regcred
+      volumes:
+      - name: scheduler-api-kubeconfig
+        secret:
+          secretName: target-api-kubeconfig
+      containers:
+      - name: controller
+        image: elotl/kueue-cluster-select-controller:v0.0.1e
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SCHEDULER_API_KUBECONFIG
+          value: /etc/scheduler-api/kubeconfig
+        volumeMounts:
+        - name: scheduler-api-kubeconfig
+          mountPath: /etc/scheduler-api
+          readOnly: true
+        command: ["/manager"]
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+      securityContext:
+        runAsNonRoot: true
+      terminationGracePeriodSeconds: 10

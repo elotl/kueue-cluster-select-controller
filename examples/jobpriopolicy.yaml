@@ -1,0 +1,20 @@
+apiVersion: policy.elotl.co/v1alpha1
+kind: SchedulePolicy
+metadata:
+  name: kueue-job-policy
+spec:
+  orderedClusterSelector:
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: In
+        values:
+          - anne-dra
+          - anne-7336
+  namespaceSelector:
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: Exists
+  resourceSelectors:
+    labelSelectors:
+    - matchLabels:
+        kueue.x-k8s.io/queue-name: user-queue
