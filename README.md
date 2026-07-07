@@ -2,7 +2,7 @@
 Support interoperation of MultiKueue cluster dispatch with Nova 1.5.4 schedule-only mode cluster selection for efficient and policy-compliant sharing of multi-cluster K8s resources.
 
 ## Description
-Please see: https://docs.google.com/presentation/d/1OjSIG9TmmVMcCde4a374yEI6o0APc7foT90qtUmyGP8/edit?slide=id.g3f2550b6109_0_82#slide=id.g3f2550b6109_0_82
+https://www.youtube.com/watch?v=CY9uw9K-mqE
 
 ## License
 
